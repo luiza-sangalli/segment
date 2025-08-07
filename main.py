@@ -1,11 +1,12 @@
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 import json
 import os
 from datetime import datetime
 import logging
 from typing import Dict, Any
 from starlette.middleware.base import BaseHTTPMiddleware
+from collections import defaultdict
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -476,6 +477,293 @@ async def get_webhook_stats():
         "last_event": recent_events[-1]["timestamp"] if recent_events else None,
         "timestamp": datetime.now().isoformat()
     }
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def session_dashboard():
+    """Interface web para análise de sessões"""
+    html_content = """
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Dashboard de Sessões - Zé Delivery</title>
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f5f7fa; color: #333; }
+            .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; text-align: center; }
+            .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+            .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin-bottom: 30px; }
+            .stat-card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+            .stat-number { font-size: 2rem; font-weight: bold; color: #667eea; }
+            .stat-label { color: #666; margin-top: 5px; }
+            .chart-container { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); margin-bottom: 20px; }
+            .sessions-table { background: white; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); overflow: hidden; }
+            .table-header { background: #667eea; color: white; padding: 15px; font-weight: bold; }
+            .session-row { padding: 15px; border-bottom: 1px solid #eee; display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 2fr; gap: 10px; align-items: center; }
+            .session-row:hover { background: #f8f9ff; }
+            .session-id { font-family: monospace; font-size: 0.9rem; color: #666; }
+            .user-type { padding: 3px 8px; border-radius: 12px; font-size: 0.8rem; font-weight: bold; }
+            .identified { background: #e8f5e8; color: #2d5a2d; }
+            .anonymous { background: #fff3cd; color: #856404; }
+            .device-info { font-size: 0.9rem; color: #666; }
+            .events-list { font-size: 0.8rem; color: #888; }
+            .refresh-btn { background: #667eea; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; margin: 10px 0; }
+            .refresh-btn:hover { background: #5a6fd8; }
+            .loading { text-align: center; padding: 20px; color: #666; }
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>🚀 Dashboard de Sessões - Zé Delivery</h1>
+            <p>Análise em tempo real dos dados do Segment</p>
+        </div>
+
+        <div class="container">
+            <button class="refresh-btn" onclick="loadData()">🔄 Atualizar Dados</button>
+            
+            <div class="stats-grid" id="statsGrid">
+                <div class="loading">Carregando estatísticas...</div>
+            </div>
+
+            <div class="chart-container">
+                <h3>📊 Eventos por Tipo</h3>
+                <canvas id="eventsChart" width="400" height="200"></canvas>
+            </div>
+
+            <div class="chart-container">
+                <h3>📱 Dispositivos</h3>
+                <canvas id="devicesChart" width="400" height="200"></canvas>
+            </div>
+
+            <div class="sessions-table">
+                <div class="table-header">
+                    📱 Sessões Ativas
+                </div>
+                <div id="sessionsTable">
+                    <div class="loading">Carregando sessões...</div>
+                </div>
+            </div>
+        </div>
+
+        <script>
+            let eventsChart, devicesChart;
+
+            async function loadData() {
+                try {
+                    // Carregar estatísticas
+                    const statsResponse = await fetch('/webhook/stats');
+                    const stats = await statsResponse.json();
+                    
+                    // Carregar dados de sessões
+                    const sessionsResponse = await fetch('/api/sessions');
+                    const sessions = await sessionsResponse.json();
+
+                    updateStats(stats);
+                    updateCharts(stats);
+                    updateSessionsTable(sessions);
+                } catch (error) {
+                    console.error('Erro ao carregar dados:', error);
+                }
+            }
+
+            function updateStats(stats) {
+                const statsGrid = document.getElementById('statsGrid');
+                statsGrid.innerHTML = `
+                    <div class="stat-card">
+                        <div class="stat-number">${stats.total_events}</div>
+                        <div class="stat-label">Total de Eventos</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number">${stats.unique_users}</div>
+                        <div class="stat-label">Usuários Únicos</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number">${Object.keys(stats.track_events || {}).length}</div>
+                        <div class="stat-label">Tipos de Eventos</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number">${stats.total_events > 0 ? Math.round(stats.total_events / stats.unique_users * 100) / 100 : 0}</div>
+                        <div class="stat-label">Eventos por Usuário</div>
+                    </div>
+                `;
+            }
+
+            function updateCharts(stats) {
+                // Gráfico de eventos
+                const eventsCtx = document.getElementById('eventsChart').getContext('2d');
+                if (eventsChart) eventsChart.destroy();
+                
+                const eventLabels = Object.keys(stats.track_events || {}).slice(0, 10);
+                const eventData = Object.values(stats.track_events || {}).slice(0, 10);
+                
+                eventsChart = new Chart(eventsCtx, {
+                    type: 'bar',
+                    data: {
+                        labels: eventLabels,
+                        datasets: [{
+                            label: 'Quantidade de Eventos',
+                            data: eventData,
+                            backgroundColor: 'rgba(102, 126, 234, 0.8)',
+                            borderColor: 'rgba(102, 126, 234, 1)',
+                            borderWidth: 1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        scales: {
+                            y: { beginAtZero: true }
+                        }
+                    }
+                });
+            }
+
+            function updateSessionsTable(sessions) {
+                const table = document.getElementById('sessionsTable');
+                
+                if (!sessions.sessions || sessions.sessions.length === 0) {
+                    table.innerHTML = '<div class="loading">Nenhuma sessão encontrada</div>';
+                    return;
+                }
+
+                let html = `
+                    <div class="session-row" style="font-weight: bold; background: #f8f9ff;">
+                        <div>Session ID</div>
+                        <div>Usuário</div>
+                        <div>Device</div>
+                        <div>Eventos</div>
+                        <div>Última Atividade</div>
+                    </div>
+                `;
+
+                sessions.sessions.forEach(session => {
+                    const userType = session.user_id ? 'identified' : 'anonymous';
+                    const userLabel = session.user_id ? 'Identificado' : 'Anônimo';
+                    const userId = session.user_id || session.anonymous_id || 'N/A';
+                    
+                    html += `
+                        <div class="session-row">
+                            <div class="session-id">${session.session_id.substring(0, 20)}...</div>
+                            <div>
+                                <span class="user-type ${userType}">${userLabel}</span><br>
+                                <small>${userId.substring(0, 15)}...</small>
+                            </div>
+                            <div class="device-info">
+                                ${session.device_model || 'Unknown'}<br>
+                                <small>iOS ${session.os_version || 'N/A'}</small>
+                            </div>
+                            <div>
+                                <strong>${session.events.length}</strong><br>
+                                <div class="events-list">
+                                    ${session.events.slice(0, 2).map(e => e.event).join(', ')}
+                                    ${session.events.length > 2 ? '...' : ''}
+                                </div>
+                            </div>
+                            <div>
+                                ${session.events.length > 0 ? new Date(session.events[session.events.length - 1].timestamp).toLocaleString('pt-BR') : 'N/A'}
+                            </div>
+                        </div>
+                    `;
+                });
+
+                table.innerHTML = html;
+            }
+
+            // Carregar dados iniciais
+            loadData();
+
+            // Atualizar a cada 30 segundos
+            setInterval(loadData, 30000);
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+@app.get("/api/sessions")
+async def get_sessions_analysis():
+    """API para análise detalhada de sessões"""
+    try:
+        sessions = defaultdict(list)
+        
+        # Agrupar eventos por session_id
+        for event in recent_events:
+            event_data = event["data"]
+            
+            session_id = None
+            if 'properties' in event_data and 'session_id' in event_data['properties']:
+                session_id = event_data['properties']['session_id']
+            elif 'context' in event_data and 'traits' in event_data['context'] and 'session_id' in event_data['context']['traits']:
+                session_id = event_data['context']['traits']['session_id']
+            
+            if session_id:
+                context = event_data.get('context', {})
+                app_info = context.get('app', {})
+                device_info = context.get('device', {})
+                
+                sessions[session_id].append({
+                    'session_id': session_id,
+                    'event': event_data.get('event', 'unknown'),
+                    'timestamp': event_data.get('timestamp', ''),
+                    'user_id': event_data.get('userId'),
+                    'anonymous_id': event_data.get('anonymousId'),
+                    'app_version': app_info.get('version'),
+                    'device_model': device_info.get('model'),
+                    'os_version': context.get('os', {}).get('version'),
+                    'timezone': context.get('timezone'),
+                    'network': context.get('network', {}),
+                    'screen': event_data.get('properties', {}).get('screen_name')
+                })
+        
+        # Processar sessões
+        processed_sessions = []
+        for session_id, events in sessions.items():
+            # Ordenar eventos por timestamp
+            events.sort(key=lambda x: x['timestamp'] or '')
+            
+            first_event = events[0]
+            processed_sessions.append({
+                'session_id': session_id,
+                'user_id': first_event['user_id'],
+                'anonymous_id': first_event['anonymous_id'],
+                'device_model': first_event['device_model'],
+                'os_version': first_event['os_version'],
+                'timezone': first_event['timezone'],
+                'network': first_event['network'],
+                'events': [{'event': e['event'], 'timestamp': e['timestamp'], 'screen': e['screen']} for e in events],
+                'total_events': len(events),
+                'duration': calculate_session_duration(events),
+                'first_event_time': events[0]['timestamp'],
+                'last_event_time': events[-1]['timestamp']
+            })
+        
+        # Ordenar por última atividade
+        processed_sessions.sort(key=lambda x: x['last_event_time'] or '', reverse=True)
+        
+        return {
+            "status": "success",
+            "total_sessions": len(processed_sessions),
+            "sessions": processed_sessions[:20],  # Últimas 20 sessões
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Erro ao analisar sessões: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+def calculate_session_duration(events):
+    """Calcular duração da sessão em minutos"""
+    if len(events) < 2:
+        return 0
+    
+    try:
+        first_time = datetime.fromisoformat(events[0]['timestamp'].replace('Z', '+00:00'))
+        last_time = datetime.fromisoformat(events[-1]['timestamp'].replace('Z', '+00:00'))
+        duration = (last_time - first_time).total_seconds() / 60
+        return round(duration, 1)
+    except:
+        return 0
 
 if __name__ == "__main__":
     import uvicorn
