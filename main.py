@@ -88,6 +88,9 @@ async def segment_webhook(request: Request):
         # Log do evento recebido
         logger.info(f"Evento recebido do Segment: {json.dumps(data, indent=2)}")
         
+        # Armazenar evento para visualização
+        store_recent_event(data)
+        
         # FILTROS - Verificar se deve processar o evento
         if not should_process_event(data):
             logger.info(f"Evento filtrado e ignorado: {data.get('type', 'unknown')}")
@@ -382,6 +385,70 @@ async def update_filters(new_config: Dict[str, Any]):
     except Exception as e:
         logger.error(f"Erro ao atualizar filtros: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# Storage simples para últimos eventos (em produção, usar banco de dados)
+recent_events = []
+MAX_RECENT_EVENTS = 50
+
+def store_recent_event(event_data: Dict[str, Any]):
+    """Armazenar evento recente na memória"""
+    recent_events.append({
+        "timestamp": datetime.now().isoformat(),
+        "data": event_data
+    })
+    # Manter apenas os últimos N eventos
+    if len(recent_events) > MAX_RECENT_EVENTS:
+        recent_events.pop(0)
+
+@app.get("/webhook/recent")
+async def get_recent_events():
+    """Visualizar últimos eventos recebidos"""
+    return {
+        "status": "success",
+        "total_events": len(recent_events),
+        "events": recent_events[-10:],  # Últimos 10 eventos
+        "timestamp": datetime.now().isoformat()
+    }
+
+@app.get("/webhook/stats")
+async def get_webhook_stats():
+    """Estatísticas dos eventos recebidos"""
+    if not recent_events:
+        return {
+            "status": "success",
+            "message": "Nenhum evento recebido ainda",
+            "total_events": 0,
+            "timestamp": datetime.now().isoformat()
+        }
+    
+    # Contar tipos de eventos
+    event_types = {}
+    event_names = {}
+    users = set()
+    
+    for event in recent_events:
+        data = event["data"]
+        event_type = data.get("type", "unknown")
+        event_types[event_type] = event_types.get(event_type, 0) + 1
+        
+        if event_type == "track":
+            event_name = data.get("event", "unknown")
+            event_names[event_name] = event_names.get(event_name, 0) + 1
+        
+        user_id = data.get("userId")
+        if user_id:
+            users.add(user_id)
+    
+    return {
+        "status": "success",
+        "total_events": len(recent_events),
+        "unique_users": len(users),
+        "event_types": event_types,
+        "track_events": event_names,
+        "first_event": recent_events[0]["timestamp"] if recent_events else None,
+        "last_event": recent_events[-1]["timestamp"] if recent_events else None,
+        "timestamp": datetime.now().isoformat()
+    }
 
 if __name__ == "__main__":
     import uvicorn
