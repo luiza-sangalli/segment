@@ -1,11 +1,11 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
-from fastapi.middleware.base import BaseHTTPMiddleware
 import json
 import os
 from datetime import datetime
 import logging
 from typing import Dict, Any
+from starlette.middleware.base import BaseHTTPMiddleware
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
