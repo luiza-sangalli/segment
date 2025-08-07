@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
+from fastapi.middleware.base import BaseHTTPMiddleware
 import json
 import os
 from datetime import datetime
@@ -15,6 +16,21 @@ app = FastAPI(
     description="Webhook para receber eventos do Segment",
     version="1.0.0"
 )
+
+# Middleware para logar todas as requisições
+class LoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Log da requisição
+        logger.info(f"🌐 {request.method} {request.url.path} - Headers: {dict(request.headers)}")
+        
+        response = await call_next(request)
+        
+        # Log da resposta
+        logger.info(f"📤 {response.status_code} para {request.method} {request.url.path}")
+        
+        return response
+
+app.add_middleware(LoggingMiddleware)
 
 # CONFIGURAÇÕES DE FILTROS
 FILTER_CONFIG = {
@@ -57,11 +73,22 @@ FILTER_CONFIG = {
 
 @app.get("/")
 async def root():
-    """Endpoint de health check"""
+    """Endpoint de health check com informações das rotas"""
     return {
         "message": "Webhook Segment está funcionando!",
         "timestamp": datetime.now().isoformat(),
-        "status": "healthy"
+        "status": "healthy",
+        "available_endpoints": {
+            "GET /": "Health check",
+            "GET /health": "Health check para Railway",
+            "POST /webhook/segment": "Endpoint principal para eventos do Segment",
+            "POST /webhook/test": "Endpoint de teste",
+            "GET /webhook/filters": "Ver configurações de filtro",
+            "POST /webhook/filters": "Atualizar filtros",
+            "GET /webhook/recent": "Ver últimos eventos recebidos",
+            "GET /webhook/stats": "Estatísticas dos eventos"
+        },
+        "correct_webhook_url": "https://segment-production.up.railway.app/webhook/segment"
     }
 
 @app.get("/health")
