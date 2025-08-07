@@ -16,6 +16,45 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# CONFIGURAÇÕES DE FILTROS
+FILTER_CONFIG = {
+    # Tipos de eventos aceitos
+    "allowed_event_types": ["track", "identify", "page", "screen"],
+    
+    # Eventos track específicos que você quer processar
+    "allowed_track_events": [
+        "Button Clicked",
+        "Purchase Completed", 
+        "User Signup",
+        "Page Viewed",
+        "Product Added",
+        "Checkout Started"
+        # Adicione os eventos que você quer processar
+    ],
+    
+    # Filtros por propriedades
+    "required_properties": {
+        # "track": ["userId"],  # Track events devem ter userId
+        # "identify": ["userId", "traits"]  # Identify deve ter userId e traits
+    },
+    
+    # Filtrar por valores específicos
+    "property_filters": {
+        # Exemplo: só processar eventos de usuários premium
+        # "traits.plan": ["premium", "enterprise"],
+        # "properties.environment": ["production"]
+    },
+    
+    # Ignorar eventos de teste/desenvolvimento
+    "ignore_test_events": True,
+    "test_patterns": ["test", "debug", "dev", "local"],
+    
+    # Filtrar por data - apenas eventos de hoje
+    "filter_by_date": True,
+    "date_field": "timestamp",  # Campo que contém a data do evento
+    "max_age_hours": 24  # Máximo 24 horas (dia atual)
+}
+
 @app.get("/")
 async def root():
     """Endpoint de health check"""
@@ -49,6 +88,18 @@ async def segment_webhook(request: Request):
         # Log do evento recebido
         logger.info(f"Evento recebido do Segment: {json.dumps(data, indent=2)}")
         
+        # FILTROS - Verificar se deve processar o evento
+        if not should_process_event(data):
+            logger.info(f"Evento filtrado e ignorado: {data.get('type', 'unknown')}")
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status": "filtered",
+                    "message": "Evento filtrado conforme regras configuradas",
+                    "timestamp": datetime.now().isoformat()
+                }
+            )
+        
         # Processar o evento baseado no tipo
         event_type = data.get("type", "unknown")
         
@@ -77,6 +128,136 @@ async def segment_webhook(request: Request):
     except Exception as e:
         logger.error(f"Erro ao processar webhook: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
+
+def should_process_event(data: Dict[str, Any]) -> bool:
+    """
+    Determina se o evento deve ser processado com base nos filtros configurados
+    """
+    event_type = data.get("type", "").lower()
+    
+    # 1. Verificar tipo de evento permitido
+    if event_type not in FILTER_CONFIG["allowed_event_types"]:
+        logger.info(f"Tipo de evento não permitido: {event_type}")
+        return False
+    
+    # 2. Para eventos track, verificar se o evento específico é permitido
+    if event_type == "track":
+        event_name = data.get("event", "")
+        allowed_events = FILTER_CONFIG["allowed_track_events"]
+        
+        # Se lista vazia, aceitar todos os track events
+        if allowed_events and event_name not in allowed_events:
+            logger.info(f"Evento track não permitido: {event_name}")
+            return False
+    
+    # 3. Ignorar eventos de teste se configurado
+    if FILTER_CONFIG["ignore_test_events"]:
+        test_patterns = FILTER_CONFIG["test_patterns"]
+        
+        # Verificar em diferentes campos se contém padrões de teste
+        fields_to_check = [
+            data.get("event", ""),
+            data.get("userId", ""),
+            str(data.get("properties", {})),
+            str(data.get("traits", {}))
+        ]
+        
+        for field in fields_to_check:
+            field_lower = str(field).lower()
+            if any(pattern in field_lower for pattern in test_patterns):
+                logger.info(f"Evento de teste ignorado: {field}")
+                return False
+    
+    # 4. Verificar propriedades obrigatórias
+    required_props = FILTER_CONFIG["required_properties"].get(event_type, [])
+    for prop in required_props:
+        if prop not in data or not data[prop]:
+            logger.info(f"Propriedade obrigatória ausente: {prop}")
+            return False
+    
+    # 5. Aplicar filtros por valores específicos
+    property_filters = FILTER_CONFIG["property_filters"]
+    for filter_path, allowed_values in property_filters.items():
+        value = get_nested_value(data, filter_path)
+        if value and value not in allowed_values:
+            logger.info(f"Valor não permitido para {filter_path}: {value}")
+            return False
+    
+    # 6. Filtrar por data - apenas eventos de hoje
+    if FILTER_CONFIG["filter_by_date"]:
+        if not is_event_from_today(data):
+            logger.info("Evento ignorado: não é do dia de hoje")
+            return False
+    
+    return True
+
+def get_nested_value(data: Dict[str, Any], path: str) -> Any:
+    """
+    Obter valor aninhado usando notação de ponto (ex: 'traits.plan')
+    """
+    keys = path.split('.')
+    value = data
+    
+    try:
+        for key in keys:
+            value = value[key]
+        return value
+    except (KeyError, TypeError):
+        return None
+
+def is_event_from_today(data: Dict[str, Any]) -> bool:
+    """
+    Verifica se o evento é do dia de hoje com base no timestamp
+    """
+    from datetime import datetime, timezone, timedelta
+    
+    # Obter timestamp do evento
+    timestamp_field = FILTER_CONFIG["date_field"]
+    timestamp_str = data.get(timestamp_field)
+    
+    if not timestamp_str:
+        # Se não tem timestamp, considerar como evento atual (agora)
+        logger.info("Evento sem timestamp - considerando como atual")
+        return True
+    
+    try:
+        # Parse do timestamp do Segment (formato ISO)
+        if isinstance(timestamp_str, str):
+            # Formatos comuns do Segment
+            try:
+                event_time = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+            except:
+                # Tentar outro formato
+                event_time = datetime.strptime(timestamp_str, '%Y-%m-%dT%H:%M:%S.%fZ')
+                event_time = event_time.replace(tzinfo=timezone.utc)
+        else:
+            logger.warning(f"Timestamp inválido: {timestamp_str}")
+            return True
+        
+        # Converter para UTC se necessário
+        if event_time.tzinfo is None:
+            event_time = event_time.replace(tzinfo=timezone.utc)
+        
+        # Obter hora atual
+        now = datetime.now(timezone.utc)
+        
+        # Calcular diferença em horas
+        max_age_hours = FILTER_CONFIG["max_age_hours"]
+        time_diff = now - event_time
+        hours_diff = time_diff.total_seconds() / 3600
+        
+        # Verificar se está dentro do período permitido
+        is_recent = hours_diff <= max_age_hours
+        
+        if not is_recent:
+            logger.info(f"Evento antigo ignorado: {hours_diff:.1f}h atrás (máx: {max_age_hours}h)")
+        
+        return is_recent
+        
+    except Exception as e:
+        logger.warning(f"Erro ao processar timestamp {timestamp_str}: {str(e)}")
+        # Em caso de erro, processar o evento
+        return True
 
 async def process_track_event(data: Dict[str, Any]) -> Dict[str, Any]:
     """Processar eventos de track (ações do usuário)"""
@@ -171,6 +352,35 @@ async def test_webhook(request: Request):
         )
     except Exception as e:
         logger.error(f"Erro no teste do webhook: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/webhook/filters")
+async def get_filters():
+    """Visualizar configurações de filtro atuais"""
+    return {
+        "status": "success",
+        "filters": FILTER_CONFIG,
+        "timestamp": datetime.now().isoformat()
+    }
+
+@app.post("/webhook/filters")
+async def update_filters(new_config: Dict[str, Any]):
+    """Atualizar configurações de filtro"""
+    try:
+        # Atualizar configurações (em produção, salvar em banco de dados)
+        for key, value in new_config.items():
+            if key in FILTER_CONFIG:
+                FILTER_CONFIG[key] = value
+                logger.info(f"Filtro atualizado: {key} = {value}")
+        
+        return {
+            "status": "success",
+            "message": "Filtros atualizados com sucesso",
+            "updated_filters": FILTER_CONFIG,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Erro ao atualizar filtros: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
